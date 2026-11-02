@@ -21,22 +21,38 @@
     const AUTO_RUN_KEY = 'wikispeedruns_forum_helper_autorun';
 
     // ---- Clipboard helper ------------------------------------------------
-    async function copyToClipboard(text) {
+    async function copyToClipboard(text, statusHandler) {
+        // statusHandler is optional; when provided, use it for UI feedback instead of alert()
+        const onStatus = typeof statusHandler === 'function' ? statusHandler : () => {};
+
+        // Try GM_setClipboard if available
         if (typeof GM_setClipboard === 'function') {
-            GM_setClipboard(text);
-            alert('Forum post copied to clipboard!');
-            return;
+            try {
+                GM_setClipboard(text);
+                onStatus({ ok: true });
+                return;
+            } catch (e) {
+                console.error('GM_setClipboard error:', e);
+                onStatus({ ok: false, error: e });
+                return;
+            }
         }
+
+        // Fallback: navigator.clipboard
         if (navigator.clipboard && navigator.clipboard.writeText) {
             try {
                 await navigator.clipboard.writeText(text);
-                alert('Forum post copied to clipboard!');
+                onStatus({ ok: true });
                 return;
             } catch (e) {
                 console.error('Clipboard error:', e);
+                onStatus({ ok: false, error: e });
+                return;
             }
         }
-        alert('Could not copy to clipboard; no clipboard API available.');
+
+        console.warn('No clipboard API available.');
+        onStatus({ ok: false, error: new Error('No clipboard API available') });
     }
 
     // ---- Wait for the finish card to be rendered -------------------------
@@ -310,7 +326,7 @@ ${bbCodeLine}`;
     }
 
     // ---- Custom modal with shuffle + check buttons -----------------------
-    function showDestinationModal(endTitle) {
+    function showDestinationModal(endTitle, finalTextToCopy) {
         return new Promise(async (resolve) => {
             // Create overlay
             const overlay = document.createElement('div');
@@ -377,6 +393,24 @@ ${bbCodeLine}`;
             const cancelBtn = modal.querySelector('#ws-cancel-btn');
             const statusEl = modal.querySelector('#ws-status');
 
+            // Helper to style Copy! button feedback
+            function setCopyButtonState(state) {
+                // state: 'idle' | 'success' | 'error'
+                if (state === 'success') {
+                    okBtn.textContent = 'Copied!';
+                    okBtn.style.backgroundColor = '#28a745'; // Bootstrap-ish success green
+                    okBtn.style.borderColor = '#28a745';
+                } else if (state === 'error') {
+                    okBtn.textContent = 'Failed!';
+                    okBtn.style.backgroundColor = '#dc3545'; // Bootstrap-ish danger red
+                    okBtn.style.borderColor = '#dc3545';
+                } else {
+                    okBtn.textContent = 'Copy!';
+                    okBtn.style.backgroundColor = '';
+                    okBtn.style.borderColor = '';
+                }
+            }
+
             async function setRandomTitle(showStatus = true) {
                 statusEl.textContent = 'Fetching random article...';
                 shuffleBtn.disabled = true;
@@ -431,10 +465,37 @@ ${bbCodeLine}`;
                 runCheck();
             });
 
-            okBtn.addEventListener('click', () => {
+            okBtn.addEventListener('click', async () => {
                 const val = inputEl.value.trim();
-                document.body.removeChild(overlay);
-                resolve(val || null);
+                if (!val) {
+                    // Nothing to copy
+                    setCopyButtonState('error');
+                    setTimeout(() => setCopyButtonState('idle'), 1500);
+                    return;
+                }
+
+                // Build final post text from caller’s data
+                // finalTextToCopy is passed in from generatePost() after building with buildForumPost()
+                const textToCopy = typeof finalTextToCopy === 'function'
+                    ? finalTextToCopy(val)
+                    : finalTextToCopy;
+
+                setCopyButtonState('idle'); // reset appearance
+                okBtn.disabled = true;
+
+                await copyToClipboard(textToCopy, (res) => {
+                    if (res.ok) {
+                        setCopyButtonState('success');
+                    } else {
+                        setCopyButtonState('error');
+                    }
+                    setTimeout(() => {
+                        setCopyButtonState('idle');
+                        okBtn.disabled = false;
+                    }, 1500);
+                });
+
+                // Don’t close the modal automatically; user can close when ready
             });
 
             cancelBtn.addEventListener('click', () => {
@@ -493,11 +554,12 @@ ${bbCodeLine}`;
             alert('Could not parse run data correctly. The page structure may have changed.');
             return;
         }
-        const nextEndTitle = await promptForNextDestination(runData.endTitle);
-        if (!nextEndTitle) return; // user cancelled
 
-        const finalText = buildForumPost(runData, nextEndTitle);
-        await copyToClipboard(finalText);
+        // Pass a function to build the final post when the user settles on a title
+        const builder = (nextEndTitle) => buildForumPost(runData, nextEndTitle);
+
+        // The modal controls copying and returns the chosen article (or null)
+        const chosen = await showDestinationModal(runData.endTitle, builder);
     }
 
     // ---- Inject "Generate forum post" button ------------------------------
