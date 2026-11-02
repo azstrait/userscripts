@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      1.3.1
+// @version      1.3.2
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
