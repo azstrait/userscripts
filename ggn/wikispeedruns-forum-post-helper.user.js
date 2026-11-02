@@ -120,14 +120,14 @@
             // ]
             const full = pathP.textContent;
             const lines = full.split('\n').map(s => s.trim()).filter(Boolean);
- 
+
             // First non-empty line is label, remaining lines are the array pieces
             const labelIndex = lines.findIndex(l => l.startsWith('The path you took'));
             const arrayLines = labelIndex >= 0 ? lines.slice(labelIndex + 1) : lines;
- 
+
             // Join all array lines with spaces to get one line
             let joined = arrayLines.join(' ');
- 
+
             // Ensure exactly one leading "[" and one trailing "]"
             // Strip all leading "[" and trailing "]", then add one of each
             joined = joined.replace(/^\[+/, '').replace(/\]+$/, '').trim();
@@ -147,20 +147,20 @@
 
         return `"${startTitle}" to "${endTitle}"
 Time: ${timeSeconds} Seconds
- 
+
 Number of links visited: ${numLinks}
- 
+
 The path you took:
 ${pathLine}
- 
+
 ${bbCodeLine}`;
     }
- 
+
     // ---- Get a random Wikipedia article title via API --------------------
     function getRandomWikipediaTitle() {
         return new Promise((resolve) => {
             const url = 'https://en.wikipedia.org/api/rest_v1/page/random/summary';
- 
+
             // Prefer GM_xmlhttpRequest for cross-origin
             if (typeof GM_xmlhttpRequest === 'function') {
                 GM_xmlhttpRequest({
@@ -479,12 +479,12 @@ ${bbCodeLine}`;
             inputEl.focus();
         });
     }
- 
+
     // ---- Prompt wrapper using the modal ----------------------------------
     async function promptForNextDestination(endTitle) {
         return showDestinationModal(endTitle);
     }
- 
+
     // ---- Core generation routine -----------------------------------------
     async function generatePost(cardBody, cachedRunData) {
         const runData = cachedRunData || parseRunData(cardBody);
@@ -495,11 +495,11 @@ ${bbCodeLine}`;
         }
         const nextEndTitle = await promptForNextDestination(runData.endTitle);
         if (!nextEndTitle) return; // user cancelled
- 
+
         const finalText = buildForumPost(runData, nextEndTitle);
         await copyToClipboard(finalText);
     }
- 
+
     // ---- Inject "Generate forum post" button ------------------------------
     function injectButton(cardBody, runData) {
         // Find the "Return to home page" div
@@ -510,17 +510,17 @@ ${bbCodeLine}`;
             d.textContent.includes('Play again')
         );
         if (!homeDiv) return;
- 
+
         // Create container and button
         const wrapper = document.createElement('div');
         wrapper.className = 'py-2';
- 
+
         const button = document.createElement('button');
         button.className = 'btn btn-outline-secondary';
         button.textContent = 'Generate forum post';
- 
+
         wrapper.appendChild(button);
- 
+
         // Insert between "Return to home page" and "Play again" if possible,
         // else just after "Return to home page".
         if (homeDiv.parentNode) {
@@ -530,16 +530,16 @@ ${bbCodeLine}`;
                 homeDiv.parentNode.insertBefore(wrapper, homeDiv.nextSibling);
             }
         }
- 
+
         button.addEventListener('click', () => {
             generatePost(cardBody, runData);
         });
     }
- 
+
     // ---- Menu toggles for auto-run ---------------------------------------
     function setupMenu() {
         const autoRun = GM_getValue(AUTO_RUN_KEY, true);
- 
+
         if (typeof GM_registerMenuCommand === 'function') {
             GM_registerMenuCommand(
                 autoRun ? '☑ Run automatically on finish page' : '☐ Run automatically on finish page',
@@ -549,7 +549,7 @@ ${bbCodeLine}`;
                     window.location.reload();
                 }
             );
- 
+
             // Still keep a manual "Generate" command
             GM_registerMenuCommand('Generate Speedrun Forum Post (manual)', async () => {
                 const cardBody = document.querySelector('.card.md .card-body');
@@ -562,23 +562,23 @@ ${bbCodeLine}`;
             });
         }
     }
- 
+
     // ---- Main entry ------------------------------------------------------
     async function main() {
         setupMenu();
- 
+
         try {
             const cardBody = await waitForCardBody().catch(err => {
                 console.error(err);
                 alert('Could not detect run data on the finish page. The script may need updating.');
             });
             if (!cardBody) return;
- 
+
             const runData = parseRunData(cardBody);
- 
+
             // Always inject the UI button
             injectButton(cardBody, runData);
- 
+
             // Conditionally auto-run based on setting
             const autoRun = GM_getValue(AUTO_RUN_KEY, true);
             if (autoRun) {
@@ -589,7 +589,7 @@ ${bbCodeLine}`;
             alert('An error occurred in the userscript. See console for details.');
         }
     }
- 
+
     // Auto-run on page load
     main();
 })();
