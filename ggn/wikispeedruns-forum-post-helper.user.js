@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      1.3.2
+// @version      2.0.0
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
 // @match        https://wikispeedruns.com/quick_run/finish*
-// @icon         https://ptpimg.me/u890ms.png
+// @icon         https://i.ibb.co/TBRyTXDF/wsr-logo.png
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
@@ -18,12 +18,21 @@
 (function () {
     'use strict';
 
+    // Debounce delay for suggestions, time between typing and suggestions appearing.
+    // Increase for fewer API calls, decrease for faster suggestions.
+    const DEBOUNCE_MS = 200;
+    // Backlinks warning threshold (inclusive).
+    // 0 backlinks always errors and blocks Copy!.
+    const BACKLINKS_WARN_MAX = 5;
+    // ===================================================
+
     const AUTO_RUN_KEY = 'wikispeedruns_forum_helper_autorun';
+    const AUTO_FILL_RANDOM_KEY = 'wikispeedruns_forum_helper_autofill_random';
 
     // ---- Clipboard helper ------------------------------------------------
     async function copyToClipboard(text, statusHandler) {
         // statusHandler is optional; when provided, use it for UI feedback instead of alert()
-        const onStatus = typeof statusHandler === 'function' ? statusHandler : () => {};
+        const onStatus = typeof statusHandler === 'function' ? statusHandler : () => { };
 
         // Try GM_setClipboard if available
         if (typeof GM_setClipboard === 'function') {
@@ -177,6 +186,11 @@ ${bbCodeLine}`;
         return new Promise((resolve) => {
             const url = 'https://en.wikipedia.org/api/rest_v1/page/random/summary';
 
+            const handleError = (err) => {
+                console.error('Random article error:', err);
+                resolve('');
+            };
+
             // Prefer GM_xmlhttpRequest for cross-origin
             if (typeof GM_xmlhttpRequest === 'function') {
                 GM_xmlhttpRequest({
@@ -193,14 +207,10 @@ ${bbCodeLine}`;
                                 resolve('');
                             }
                         } catch (e) {
-                            console.error('Random article parse error:', e);
-                            resolve('');
+                            handleError(e);
                         }
                     },
-                    onerror: function (err) {
-                        console.error('Random article request failed:', err);
-                        resolve('');
-                    }
+                    onerror: handleError
                 });
             } else {
                 // Fallback to fetch if GM_xmlhttpRequest is not available
@@ -210,123 +220,183 @@ ${bbCodeLine}`;
                         const title = data && data.title ? data.title.trim() : '';
                         resolve(title);
                     })
-                    .catch(err => {
-                        console.error('Random article fetch failed:', err);
-                        resolve('');
-                    });
+                    .catch(handleError);
             }
         });
     }
 
-    // ---- Fuzzy-check a Wikipedia title via search API --------------------
-    function checkWikipediaTitle(rawInput) {
-        return new Promise((resolve) => {
-            const query = rawInput.trim();
-            if (!query) {
-                resolve({ ok: false, title: '', message: 'Please enter a title to check.' });
+    // ---- Wikipedia API helpers -------------------------------------------
+    function wikiApiGetJson(url) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    onload: function (response) {
+                        try {
+                            if (response.status >= 200 && response.status < 300) {
+                                resolve(JSON.parse(response.responseText));
+                            } else {
+                                reject(new Error(`HTTP ${response.status}`));
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    },
+                    onerror: function (err) {
+                        reject(err);
+                    }
+                });
                 return;
             }
 
-            // Use Search API for fuzzy matching
-            const apiUrl =
+            fetch(url)
+                .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+                .then(resolve)
+                .catch(reject);
+        });
+    }
+
+    // Resolve a title to a real page (following redirects). Returns:
+    // - exists: boolean
+    // - title: canonical title if exists
+    // - fullurl: canonical URL if exists
+    // - redirectFrom/redirectTo when redirect was followed
+    async function resolveWikipediaTitle(title) {
+        const url =
+            'https://en.wikipedia.org/w/api.php' +
+            '?action=query&format=json&origin=*' +
+            '&redirects=1&prop=info&inprop=url' +
+            '&titles=' + encodeURIComponent(title);
+
+        const data = await wikiApiGetJson(url);
+
+        const pagesObj = data && data.query && data.query.pages ? data.query.pages : null;
+        if (!pagesObj) return { exists: false };
+
+        // Usually there is exactly one page in the response.
+        const pageKey = Object.keys(pagesObj)[0];
+        const page = pagesObj[pageKey];
+
+        if (!page) return { exists: false };
+
+        // MediaWiki marks missing pages with pageid -1 and a "missing" property
+        // (often an empty string), so checking truthiness is not enough.
+        const isMissing =
+            pageKey === '-1' ||
+            page.pageid === -1 ||
+            Object.prototype.hasOwnProperty.call(page, 'missing');
+
+        if (isMissing) return { exists: false };
+
+        let redirectFrom = null;
+        let redirectTo = null;
+        if (data.query && Array.isArray(data.query.redirects) && data.query.redirects.length > 0) {
+            redirectFrom = data.query.redirects[0].from || null;
+            redirectTo = data.query.redirects[0].to || null;
+        }
+
+        return {
+            exists: true,
+            title: page.title || '',
+            fullurl: page.fullurl || '',
+            redirectFrom,
+            redirectTo
+        };
+    }
+
+    // Single best match using MediaWiki search.
+    async function searchClosestWikipediaTitle(query) {
+        const url =
+            'https://en.wikipedia.org/w/api.php' +
+            '?action=query&format=json&origin=*' +
+            '&list=search&srnamespace=0&srlimit=1' +
+            '&srsearch=' + encodeURIComponent(query);
+
+        const data = await wikiApiGetJson(url);
+        const results = data && data.query && Array.isArray(data.query.search) ? data.query.search : [];
+        if (!results.length || !results[0] || !results[0].title) return { found: false };
+        return { found: true, title: results[0].title };
+    }
+
+    // Backlinks sample (namespace 0). bllimit=50 gives "50+" behavior.
+    async function fetchBacklinksSampleCount(title) {
+        const url =
+            'https://en.wikipedia.org/w/api.php' +
+            '?action=query&format=json&origin=*' +
+            '&list=backlinks&blnamespace=0&bllimit=50' +
+            '&bltitle=' + encodeURIComponent(title);
+
+        const data = await wikiApiGetJson(url);
+        const backlinks = data && data.query && Array.isArray(data.query.backlinks) ? data.query.backlinks : [];
+        return backlinks.length;
+    }
+
+    // ---- Opensearch suggestions (live dropdown) --------------------------
+    function fetchOpensearchSuggestions(query) {
+        return new Promise((resolve) => {
+            const trimmed = query.trim();
+            if (!trimmed) {
+                resolve([]);
+                return;
+            }
+
+            const url =
                 'https://en.wikipedia.org/w/api.php' +
-                '?action=query&list=search&srnamespace=0&format=json&origin=*' +
-                '&srlimit=1&srsearch=' + encodeURIComponent(query);
+                '?action=opensearch&limit=3&namespace=0&format=json&origin=*' +
+                '&search=' + encodeURIComponent(trimmed);
 
-            const handleResponse = (data) => {
+            const handleData = (data) => {
                 try {
-                    if (!data || !data.query || !data.query.search || data.query.search.length === 0) {
-                        resolve({
-                            ok: false,
-                            title: '',
-                            message: `No results found for "${query}". You can still use it if you want.`
-                        });
+                    if (!Array.isArray(data) || data.length < 2) {
+                        resolve([]);
                         return;
                     }
-                    const top = data.query.search[0];
-                    const bestTitle = top && top.title ? top.title.trim() : '';
-                    if (!bestTitle) {
-                        resolve({
-                            ok: false,
-                            title: '',
-                            message: `No usable result for "${query}".`
-                        });
-                        return;
-                    }
-
-                    // If identical ignoring case, we treat as already correct
-                    if (bestTitle.toLowerCase() === query.toLowerCase()) {
-                        resolve({
-                            ok: true,
-                            title: bestTitle,
-                            message: `Valid article: ${bestTitle}`
-                        });
-                    } else {
-                        resolve({
-                            ok: true,
-                            title: bestTitle,
-                            message: `Did you mean: ${bestTitle}?`
-                        });
-                    }
+                    const titles = Array.isArray(data[1]) ? data[1] : [];
+                    resolve(titles.map(t => String(t).trim()).filter(Boolean));
                 } catch (e) {
-                    console.error('Error processing search result:', e);
-                    resolve({
-                        ok: false,
-                        title: '',
-                        message: 'Error processing search result.'
-                    });
+                    console.error('Opensearch parse error:', e);
+                    resolve([]);
                 }
             };
 
             if (typeof GM_xmlhttpRequest === 'function') {
                 GM_xmlhttpRequest({
                     method: 'GET',
-                    url: apiUrl,
+                    url,
                     onload: function (response) {
                         if (response.status === 200) {
                             let data = null;
                             try {
                                 data = JSON.parse(response.responseText);
                             } catch (e) {
-                                console.error('Search API parse error:', e);
+                                console.error('Opensearch parse error:', e);
                             }
-                            handleResponse(data);
+                            handleData(data);
                         } else {
-                            console.warn('Search API error:', response.status, response.responseText);
-                            resolve({
-                                ok: false,
-                                title: '',
-                                message: `Search API error (status ${response.status}).`
-                            });
+                            console.warn('Opensearch API error:', response.status, response.responseText);
+                            resolve([]);
                         }
                     },
                     onerror: function (err) {
-                        console.error('Search API request failed:', err);
-                        resolve({
-                            ok: false,
-                            title: '',
-                            message: 'Search API request failed.'
-                        });
+                        console.error('Opensearch request failed:', err);
+                        resolve([]);
                     }
                 });
             } else {
-                fetch(apiUrl)
+                fetch(url)
                     .then(r => (r.ok ? r.json() : null))
-                    .then(data => handleResponse(data))
+                    .then(data => handleData(data))
                     .catch(err => {
-                        console.error('Search API fetch failed:', err);
-                        resolve({
-                            ok: false,
-                            title: '',
-                            message: 'Search API fetch failed.'
-                        });
+                        console.error('Opensearch fetch failed:', err);
+                        resolve([]);
                     });
             }
         });
     }
 
-    // ---- Custom modal with shuffle + check buttons -----------------------
-    function showDestinationModal(endTitle, finalTextToCopy) {
+    // ---- Custom modal with shuffle + check + opensearch suggestions ------
+    function showDestinationModal(endTitle, buildPostForTitle) {
         return new Promise(async (resolve) => {
             // Create overlay
             const overlay = document.createElement('div');
@@ -357,30 +427,44 @@ ${bbCodeLine}`;
                 <p style="margin:0 0 8px 0; font-size:14px;">
                     You just finished at: <strong>${endTitle}</strong>
                 </p>
-                <p style="margin:0 0 10px 0; font-size:13px;">
-                    The field below is pre-filled with a random valid article from Wikipedia.<br>
-                    You can click <strong>Shuffle</strong> for a new random article, or enter your own<br>
-                    article and <strong>Check</strong> to make sure it's a valid Wikipedia article (fuzzy search).
+                <p style="margin:0 0 8px 0; font-size:13px;">
+                    Start typing a Wikipedia article title, or click <strong>Shuffle</strong> for a random article.<br>
+                    Suggestions come from Wikipedia search; <strong>Check</strong> will fuzzy-match & normalize the title.
                 </p>
-                <input type="text" id="ws-next-article-input"
-                    style="width:100%; padding:6px 8px; box-sizing:border-box; font-size:14px; margin-bottom:8px;" />
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-                    <div>
-                        <button id="ws-shuffle-btn" class="btn btn-outline-secondary" type="button"
-                            style="margin-right:6px;">
-                            ⟳ Shuffle
-                        </button>
-                        <button id="ws-check-btn" class="btn btn-outline-secondary" type="button">
-                            ✓ Check
-                        </button>
+
+                <div style="display:flex; align-items:flex-start; margin-bottom:4px;">
+                    <!-- Wrapper around ONLY the textbox + status + suggestions -->
+                    <div style="position:relative; flex:1;">
+                        <input type="text" id="ws-next-article-input"
+                            style="width:100%; padding:6px 8px; box-sizing:border-box; font-size:14px;" />
+
+                        <!-- Suggestions pinned to bottom edge of textbox, matching textbox width -->
+                        <ul id="ws-suggestions"
+                            style="list-style:none; margin:0; padding:0; max-height:150px; overflow-y:auto;
+                                border:1px solid #ccc; border-radius:4px; display:none; background:white;
+                                font-size:14px; width:100%; box-sizing:border-box; z-index:1;">
+                        </ul>
                     </div>
-                    <div style="margin-left:auto;">
-                        <button id="ws-cancel-btn" class="btn btn-secondary" type="button"
-                            style="margin-right:6px;">Close</button>
-                        <button id="ws-ok-btn" class="btn btn-primary" type="button">Copy!</button>
-                    </div>
+
+                    <button id="ws-shuffle-btn" class="btn btn-outline-secondary" type="button"
+                        title="Random article"
+                        style="margin-left:6px; display:flex; align-items:center; justify-content:center;">
+                        <i class="bi bi-shuffle"></i>
+                    </button>
+                    <button id="ws-check-btn" class="btn btn-outline-secondary" type="button"
+                        title="Check article"
+                        style="margin-left:4px; display:flex; align-items:center; justify-content:center;">
+                        <i class="bi bi-check2-square"></i>
+                    </button>
                 </div>
-                <p id="ws-status" style="margin-top:6px; font-size:11px; color:#666; min-height:1em;"></p>
+
+                <p id="ws-status" style="margin:0 0 4px 0; font-size:11px; color:#666; min-height:1em;"></p>
+
+                <div style="display:flex; justify-content:flex-end; align-items:center; margin-top:4px;">
+                    <button id="ws-cancel-btn" class="btn btn-secondary" type="button"
+                        style="margin-right:6px;">Close</button>
+                    <button id="ws-ok-btn" class="btn btn-primary" type="button">Copy!</button>
+                </div>
             `;
 
             overlay.appendChild(modal);
@@ -392,98 +476,376 @@ ${bbCodeLine}`;
             const okBtn = modal.querySelector('#ws-ok-btn');
             const cancelBtn = modal.querySelector('#ws-cancel-btn');
             const statusEl = modal.querySelector('#ws-status');
+            const suggestionsEl = modal.querySelector('#ws-suggestions');
+
+            // Tracks whether the last validation attempt had an API failure.
+            // On Copy!, a confirm dialog is shown in that state.
+            let lastValidationHadApiError = false;
 
             // Helper to style Copy! button feedback
             function setCopyButtonState(state) {
-                // state: 'idle' | 'success' | 'error'
+                // state: 'idle' | 'success' | 'error' | 'disabled_error'
                 if (state === 'success') {
                     okBtn.textContent = 'Copied!';
                     okBtn.style.backgroundColor = '#28a745'; // Bootstrap-ish success green
                     okBtn.style.borderColor = '#28a745';
+                    okBtn.disabled = true;
                 } else if (state === 'error') {
                     okBtn.textContent = 'Failed!';
                     okBtn.style.backgroundColor = '#dc3545'; // Bootstrap-ish danger red
                     okBtn.style.borderColor = '#dc3545';
+                    okBtn.disabled = false;
+                } else if (state === 'disabled_error') {
+                    okBtn.textContent = 'Copy!';
+                    okBtn.style.backgroundColor = '#dc3545';
+                    okBtn.style.borderColor = '#dc3545';
+                    okBtn.disabled = true;
                 } else {
                     okBtn.textContent = 'Copy!';
                     okBtn.style.backgroundColor = '';
                     okBtn.style.borderColor = '';
+                    okBtn.disabled = false;
                 }
             }
 
-            async function setRandomTitle(showStatus = true) {
+            // Status line renderer:
+            // - articleText: a fragment containing the "Valid/Redirect/Closest match" part, including links
+            // - backlinksText: optional fragment (colored pale green)
+            // - mode: 'normal' | 'warn' | 'error'
+            function setStatusLine({ mode = 'normal', articleFrag = null, tailText = '', backlinksText = '' }) {
+                statusEl.replaceChildren();
+
+                if (mode === 'error') statusEl.style.color = '#dc3545';
+                else if (mode === 'warn') statusEl.style.color = '#b58100'; // amber-ish
+                else statusEl.style.color = '#666';
+
+                if (articleFrag) statusEl.appendChild(articleFrag);
+
+                if (tailText) {
+                    statusEl.appendChild(document.createTextNode(tailText));
+                }
+
+                if (backlinksText) {
+                    const bl = document.createElement('span');
+                    bl.textContent = backlinksText;
+                    bl.style.color = '#2f7d32'; // pale green
+                    statusEl.appendChild(bl);
+                }
+            }
+
+            function makeWikiLink(title, fullurl) {
+                const a = document.createElement('a');
+                a.href = fullurl || ('https://en.wikipedia.org/wiki/' + encodeURIComponent(title.replace(/ /g, '_')));
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                a.textContent = title;
+                return a;
+            }
+
+            function makeArticleFragment(kind, { title, fullurl, redirectFrom = '', redirectTo = '' }) {
+                const frag = document.createDocumentFragment();
+
+                if (kind === 'redirect') {
+                    frag.appendChild(document.createTextNode('Redirect: '));
+                    frag.appendChild(document.createTextNode(redirectFrom));
+                    frag.appendChild(document.createTextNode(' → '));
+                    frag.appendChild(makeWikiLink(redirectTo || title, fullurl));
+                    return frag;
+                }
+
+                if (kind === 'closest') {
+                    frag.appendChild(document.createTextNode('Closest match: '));
+                    frag.appendChild(makeWikiLink(title, fullurl));
+                    return frag;
+                }
+
+                // kind === 'valid'
+                frag.appendChild(document.createTextNode('Valid article: '));
+                frag.appendChild(makeWikiLink(title, fullurl));
+                return frag;
+            }
+
+            // Normalizes title + checks backlinks. Only runs on:
+            // - suggestion click
+            // - shuffle click
+            // - check click
+            async function validateAndRender(inputTitle, source) {
+                // source: 'suggestion' | 'check' | 'shuffle'
+                lastValidationHadApiError = false;
+
+                // Reset status and Copy state during validation
+                setStatusLine({ mode: 'normal', articleFrag: document.createDocumentFragment(), tailText: 'Checking article...' });
+                setCopyButtonState('idle');
+
+                const raw = (inputTitle || '').trim();
+                if (!raw) {
+                    setStatusLine({ mode: 'normal', articleFrag: null, tailText: 'Please enter a Wikipedia article title to check.' });
+                    return { ok: false };
+                }
+
+                shuffleBtn.disabled = true;
+                checkBtn.disabled = true;
+
+                try {
+                    // Step 1: resolve exact title (redirects included)
+                    let resolved = await resolveWikipediaTitle(raw);
+
+                    let articleKind = 'valid';
+                    let canonicalTitle = '';
+                    let canonicalUrl = '';
+                    let redirectFrom = '';
+                    let redirectTo = '';
+
+                    if (resolved.exists) {
+                        canonicalTitle = resolved.title;
+                        canonicalUrl = resolved.fullurl;
+                        if (resolved.redirectFrom && resolved.redirectTo) {
+                            articleKind = 'redirect';
+                            redirectFrom = resolved.redirectFrom;
+                            redirectTo = resolved.redirectTo;
+                        } else {
+                            articleKind = 'valid';
+                        }
+                    } else {
+                        // Step 2: closest match via search
+                        const closest = await searchClosestWikipediaTitle(raw);
+                        if (!closest.found) {
+                            setStatusLine({
+                                mode: 'error',
+                                articleFrag: null,
+                                tailText: `No results found for "${raw}". Please choose a different article.`
+                            });
+                            setCopyButtonState('disabled_error');
+                            return { ok: false };
+                        }
+
+                        const resolvedClosest = await resolveWikipediaTitle(closest.title);
+                        if (!resolvedClosest.exists) {
+                            setStatusLine({
+                                mode: 'error',
+                                articleFrag: null,
+                                tailText: `No usable result for "${raw}". Please choose a different article.`
+                            });
+                            setCopyButtonState('disabled_error');
+                            return { ok: false };
+                        }
+
+                        articleKind = 'closest';
+                        canonicalTitle = resolvedClosest.title;
+                        canonicalUrl = resolvedClosest.fullurl;
+                    }
+
+                    // Update textbox to the canonical title when it changes.
+                    if (canonicalTitle && inputEl.value.trim() !== canonicalTitle) {
+                        inputEl.value = canonicalTitle;
+                    }
+
+                    // Step 3: backlinks (namespace 0), sample size up to 50
+                    const blCount = await fetchBacklinksSampleCount(canonicalTitle);
+                    const blDisplay = (blCount >= 50) ? '50+' : String(blCount);
+
+                    // Build article prefix fragment
+                    const articleFrag = makeArticleFragment(articleKind, {
+                        title: canonicalTitle,
+                        fullurl: canonicalUrl,
+                        redirectFrom,
+                        redirectTo
+                    });
+
+                    // Apply message rules
+                    if (blCount === 0) {
+                        setStatusLine({
+                            mode: 'error',
+                            articleFrag,
+                            tailText: ', but no backlinks were found. Please choose a different article.'
+                        });
+                        setCopyButtonState('disabled_error');
+                        return { ok: false, canonicalTitle };
+                    }
+
+                    if (blCount >= 1 && blCount <= BACKLINKS_WARN_MAX) {
+                        setStatusLine({
+                            mode: 'warn',
+                            articleFrag,
+                            tailText: `, but only ${blDisplay} backlinks were found. This article may make for a challenging speedrun.`
+                        });
+                        setCopyButtonState('idle');
+                        return { ok: true, canonicalTitle, backlinks: blCount };
+                    }
+
+                    // 6-49 => N backlinks found. 50 => 50+ backlinks found.
+                    setStatusLine({
+                        mode: 'normal',
+                        articleFrag,
+                        tailText: ' (',
+                        backlinksText: `${blDisplay} backlinks found.`,
+                    });
+                    statusEl.appendChild(document.createTextNode(')'));
+                    setCopyButtonState('idle');
+                    return { ok: true, canonicalTitle, backlinks: blCount };
+
+                } catch (e) {
+                    console.error('Validation error:', e);
+
+                    lastValidationHadApiError = true;
+
+                    // API failures show a warning line. Copy behavior:
+                    // - suggestion click: allow copying without confirm
+                    // - shuffle/check: require confirm on Copy!
+                    setStatusLine({
+                        mode: 'warn',
+                        articleFrag: null,
+                        tailText: 'Could not fully validate this article right now (Wikipedia API error). Please verify the link works before posting.'
+                    });
+
+                    setCopyButtonState('idle');
+                    return { ok: true, apiError: true };
+                } finally {
+                    shuffleBtn.disabled = false;
+                    checkBtn.disabled = false;
+                }
+            }
+
+            async function setRandomTitleAndValidate() {
                 statusEl.textContent = 'Fetching random article...';
                 shuffleBtn.disabled = true;
                 checkBtn.disabled = true;
                 try {
                     const title = await getRandomWikipediaTitle();
                     inputEl.value = title || '';
-                    if (showStatus) {
-                        statusEl.textContent = title
-                            ? `Random article: ${title}`
-                            : 'Could not fetch a random article. You can type any title manually.';
-                    } else {
-                        statusEl.textContent = '';
-                    }
+                    hideSuggestions();
                 } finally {
                     shuffleBtn.disabled = false;
                     checkBtn.disabled = false;
                 }
+                await validateAndRender(inputEl.value, 'shuffle');
             }
 
-            async function runCheck() {
-                const raw = inputEl.value.trim();
-                if (!raw) {
-                    statusEl.textContent = 'Please enter a title to check.';
+            // Suggestions handling
+            function clearSuggestions() {
+                while (suggestionsEl.firstChild) suggestionsEl.removeChild(suggestionsEl.firstChild);
+            }
+
+            function hideSuggestions() {
+                clearSuggestions();
+                suggestionsEl.style.display = 'none';
+            }
+
+            function showSuggestionsList(titles) {
+                clearSuggestions();
+                if (!titles || titles.length === 0) {
+                    suggestionsEl.style.display = 'none';
                     return;
                 }
-                statusEl.textContent = 'Checking article...';
-                shuffleBtn.disabled = true;
-                checkBtn.disabled = true;
-                try {
-                    const result = await checkWikipediaTitle(raw);
-                    statusEl.textContent = result.message || '';
-                    if (result.ok && result.title) {
-                        // Update input to best match
-                        inputEl.value = result.title;
-                    }
-                } finally {
-                    shuffleBtn.disabled = false;
-                    checkBtn.disabled = false;
-                }
+                titles.forEach(title => {
+                    const li = document.createElement('li');
+                    li.textContent = title;
+                    li.style.padding = '4px 8px';
+                    li.style.cursor = 'pointer';
+                    li.addEventListener('mouseenter', () => {
+                        li.style.backgroundColor = '#e9ecef';
+                    });
+                    li.addEventListener('mouseleave', () => {
+                        li.style.backgroundColor = '';
+                    });
+                    li.addEventListener('click', async () => {
+                        inputEl.value = title;
+                        hideSuggestions();
+                        // Auto-check when a suggestion is chosen
+                        await validateAndRender(title, 'suggestion');
+                    });
+                    suggestionsEl.appendChild(li);
+                });
+                suggestionsEl.style.display = 'block';
             }
 
-            // Initial random fill (no status to avoid flicker)
-            setRandomTitle(false);
+            let opensearchTimer = null;
+            let lastOpensearchQuery = '';
+
+            inputEl.addEventListener('input', () => {
+                const value = inputEl.value;
+                statusEl.textContent = '';
+                setCopyButtonState('idle');
+                lastValidationHadApiError = false;
+
+                if (opensearchTimer) {
+                    clearTimeout(opensearchTimer);
+                }
+
+                if (!value.trim()) {
+                    hideSuggestions();
+                    return;
+                }
+
+                opensearchTimer = setTimeout(async () => {
+                    const q = inputEl.value;
+                    if (!q.trim()) {
+                        hideSuggestions();
+                        return;
+                    }
+                    lastOpensearchQuery = q;
+                    const titles = await fetchOpensearchSuggestions(q);
+                    // Only update if input hasn't changed during the request
+                    if (inputEl.value === lastOpensearchQuery) {
+                        showSuggestionsList(titles);
+                    }
+                }, DEBOUNCE_MS);
+            });
+
+            inputEl.addEventListener('focus', () => {
+                // If there are suggestions, show them again on focus
+                if (suggestionsEl.children.length > 0) {
+                    suggestionsEl.style.display = 'block';
+                }
+            });
+
+            inputEl.addEventListener('blur', () => {
+                // Hide suggestions shortly after blur to allow click selection
+                setTimeout(() => {
+                    suggestionsEl.style.display = 'none';
+                }, 150);
+            });
+
+            // Optional initial random fill (no status to avoid flicker)
+            const autoFillRandom = GM_getValue(AUTO_FILL_RANDOM_KEY, false);
+            if (autoFillRandom) {
+                await setRandomTitleAndValidate();
+            }
 
             // Button handlers
             shuffleBtn.addEventListener('click', () => {
-                setRandomTitle(true);
+                setRandomTitleAndValidate();
             });
 
             checkBtn.addEventListener('click', () => {
-                runCheck();
+                validateAndRender(inputEl.value, 'check');
             });
 
             okBtn.addEventListener('click', async () => {
                 const val = inputEl.value.trim();
                 if (!val) {
                     // Nothing to copy
+                    setStatusLine({ mode: 'error', articleFrag: null, tailText: 'Please enter a Wikipedia article title before copying.' });
                     setCopyButtonState('error');
                     setTimeout(() => setCopyButtonState('idle'), 1500);
                     return;
                 }
 
-                // Build final post text from caller’s data
-                // finalTextToCopy is passed in from generatePost() after building with buildForumPost()
-                const textToCopy = typeof finalTextToCopy === 'function'
-                    ? finalTextToCopy(val)
-                    : finalTextToCopy;
+                // If validation failed earlier due to API error (and it was not from suggestion click),
+                // prompt for confirmation before posting a potentially broken link.
+                if (lastValidationHadApiError) {
+                    const proceed = window.confirm(
+                        'Could not fully validate this article due to a Wikipedia API error.\n\n' +
+                        'Verify the article link works before posting.\n\n' +
+                        'Copy anyway?'
+                    );
+                    if (!proceed) return;
+                }
 
-                setCopyButtonState('idle'); // reset appearance
+                const finalText = buildPostForTitle(val);
                 okBtn.disabled = true;
 
-                await copyToClipboard(textToCopy, (res) => {
+                await copyToClipboard(finalText, (res) => {
                     if (res.ok) {
                         setCopyButtonState('success');
                     } else {
@@ -495,7 +857,10 @@ ${bbCodeLine}`;
                     }, 1500);
                 });
 
-                // Don’t close the modal automatically; user can close when ready
+                // Clipboard acknowledgement (blocking) per preference when validation had API failure.
+                if (lastValidationHadApiError) {
+                    alert('Forum post copied to clipboard. Double-check the Wikipedia link before posting.');
+                }
             });
 
             cancelBtn.addEventListener('click', () => {
@@ -542,8 +907,9 @@ ${bbCodeLine}`;
     }
 
     // ---- Prompt wrapper using the modal ----------------------------------
-    async function promptForNextDestination(endTitle) {
-        return showDestinationModal(endTitle);
+    async function promptForNextDestination(runData) {
+        const builder = (nextEndTitle) => buildForumPost(runData, nextEndTitle);
+        return showDestinationModal(runData.endTitle, builder);
     }
 
     // ---- Core generation routine -----------------------------------------
@@ -554,12 +920,7 @@ ${bbCodeLine}`;
             alert('Could not parse run data correctly. The page structure may have changed.');
             return;
         }
-
-        // Pass a function to build the final post when the user settles on a title
-        const builder = (nextEndTitle) => buildForumPost(runData, nextEndTitle);
-
-        // The modal controls copying and returns the chosen article (or null)
-        const chosen = await showDestinationModal(runData.endTitle, builder);
+        await promptForNextDestination(runData);
     }
 
     // ---- Inject "Generate forum post" button ------------------------------
@@ -601,6 +962,7 @@ ${bbCodeLine}`;
     // ---- Menu toggles for auto-run ---------------------------------------
     function setupMenu() {
         const autoRun = GM_getValue(AUTO_RUN_KEY, true);
+        const autoFillRandom = GM_getValue(AUTO_FILL_RANDOM_KEY, false);
 
         if (typeof GM_registerMenuCommand === 'function') {
             GM_registerMenuCommand(
@@ -612,8 +974,16 @@ ${bbCodeLine}`;
                 }
             );
 
+            GM_registerMenuCommand(
+                autoFillRandom ? '☑ Automatically fill random article' : '☐ Automatically fill random article',
+                () => {
+                    GM_setValue(AUTO_FILL_RANDOM_KEY, !autoFillRandom);
+                    window.location.reload();
+                }
+            );
+
             // Still keep a manual "Generate" command
-            GM_registerMenuCommand('Generate Speedrun Forum Post (manual)', async () => {
+            GM_registerMenuCommand('Open forum post modal', async () => {
                 const cardBody = document.querySelector('.card.md .card-body');
                 if (!cardBody) {
                     alert('Could not find run summary on this page.');
