@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      1.2.2
+// @version      1.3.1
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
@@ -14,12 +14,12 @@
 // @grant        GM_setValue
 // @run-at       document-end
 // ==/UserScript==
- 
+
 (function () {
     'use strict';
- 
+
     const AUTO_RUN_KEY = 'wikispeedruns_forum_helper_autorun';
- 
+
     // ---- Clipboard helper ------------------------------------------------
     async function copyToClipboard(text) {
         if (typeof GM_setClipboard === 'function') {
@@ -38,7 +38,7 @@
         }
         alert('Could not copy to clipboard; no clipboard API available.');
     }
- 
+
     // ---- Wait for the finish card to be rendered -------------------------
     function waitForCardBody(timeoutMs = 10000) {
         const start = Date.now();
@@ -62,7 +62,7 @@
             check();
         });
     }
- 
+
     // ---- Parse data from the DOM -----------------------------------------
     function parseRunData(cardBody) {
         // 1) Header h4: contains "start" to "end" with two <strong> elements
@@ -74,11 +74,11 @@
             if (strongs[0]) startTitle = strongs[0].textContent.replace(/"/g, '').trim();
             if (strongs[1]) endTitle = strongs[1].textContent.replace(/"/g, '').trim();
         }
- 
+
         // 2) Time <p>: 'Time: <strong>xx.xxx </strong>Seconds'
         const timeP = Array.from(cardBody.querySelectorAll('p')).find(p =>
-                                                                      p.textContent.includes('Time:')
-                                                                     );
+            p.textContent.includes('Time:')
+        );
         let timeSeconds = '';
         if (timeP) {
             const timeStrong = timeP.querySelector('strong');
@@ -89,11 +89,11 @@
                 if (m) timeSeconds = m[1];
             }
         }
- 
+
         // 3) Number of links visited <p>
         const linksP = Array.from(cardBody.querySelectorAll('p')).find(p =>
-                                                                       p.textContent.includes('Number of links visited:')
-                                                                      );
+            p.textContent.includes('Number of links visited:')
+        );
         let numLinks = '';
         if (linksP) {
             const linksStrong = linksP.querySelector('strong');
@@ -104,11 +104,11 @@
                 if (m) numLinks = m[1];
             }
         }
- 
+
         // 4) Path <p>: "The path you took: <br>[ ... ]" (spans multiple lines)
         const pathP = Array.from(cardBody.querySelectorAll('p')).find(p =>
-                                                                      p.textContent.includes('The path you took:')
-                                                                     );
+            p.textContent.includes('The path you took:')
+        );
         let pathLine = '';
         if (pathP) {
             // Example textContent:
@@ -133,10 +133,10 @@
             joined = joined.replace(/^\[+/, '').replace(/\]+$/, '').trim();
             pathLine = joined.length > 0 ? `[ ${joined} ]` : '[]';
         }
- 
+
         return { startTitle, endTitle, timeSeconds, numLinks, pathLine };
     }
- 
+
     // ---- Build forum post ------------------------------------------------
     function buildForumPost(runData, nextEndTitle) {
         const { startTitle, endTitle, timeSeconds, numLinks, pathLine } = runData;
@@ -144,7 +144,7 @@
         const promptEnd = encodeURIComponent(nextEndTitle);
         const url = `https://wikispeedruns.com/play/quick_play?prompt_start=${promptStart}&prompt_end=${promptEnd}&lang=en`;
         const bbCodeLine = `[url=${url}]${endTitle} -> ${nextEndTitle}[/url]`;
- 
+
         return `"${startTitle}" to "${endTitle}"
 Time: ${timeSeconds} Seconds
  
@@ -191,18 +191,125 @@ ${bbCodeLine}`;
                 fetch(url)
                     .then(r => (r.ok ? r.json() : null))
                     .then(data => {
-                    const title = data && data.title ? data.title.trim() : '';
-                    resolve(title);
-                })
+                        const title = data && data.title ? data.title.trim() : '';
+                        resolve(title);
+                    })
                     .catch(err => {
-                    console.error('Random article fetch failed:', err);
-                    resolve('');
-                });
+                        console.error('Random article fetch failed:', err);
+                        resolve('');
+                    });
             }
         });
     }
- 
-    // ---- Custom modal with shuffle button --------------------------------
+
+    // ---- Fuzzy-check a Wikipedia title via search API --------------------
+    function checkWikipediaTitle(rawInput) {
+        return new Promise((resolve) => {
+            const query = rawInput.trim();
+            if (!query) {
+                resolve({ ok: false, title: '', message: 'Please enter a title to check.' });
+                return;
+            }
+
+            // Use Search API for fuzzy matching
+            const apiUrl =
+                'https://en.wikipedia.org/w/api.php' +
+                '?action=query&list=search&srnamespace=0&format=json&origin=*' +
+                '&srlimit=1&srsearch=' + encodeURIComponent(query);
+
+            const handleResponse = (data) => {
+                try {
+                    if (!data || !data.query || !data.query.search || data.query.search.length === 0) {
+                        resolve({
+                            ok: false,
+                            title: '',
+                            message: `No results found for "${query}". You can still use it if you want.`
+                        });
+                        return;
+                    }
+                    const top = data.query.search[0];
+                    const bestTitle = top && top.title ? top.title.trim() : '';
+                    if (!bestTitle) {
+                        resolve({
+                            ok: false,
+                            title: '',
+                            message: `No usable result for "${query}".`
+                        });
+                        return;
+                    }
+
+                    // If identical ignoring case, we treat as already correct
+                    if (bestTitle.toLowerCase() === query.toLowerCase()) {
+                        resolve({
+                            ok: true,
+                            title: bestTitle,
+                            message: `Valid article: ${bestTitle}`
+                        });
+                    } else {
+                        resolve({
+                            ok: true,
+                            title: bestTitle,
+                            message: `Did you mean: ${bestTitle}?`
+                        });
+                    }
+                } catch (e) {
+                    console.error('Error processing search result:', e);
+                    resolve({
+                        ok: false,
+                        title: '',
+                        message: 'Error processing search result.'
+                    });
+                }
+            };
+
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: apiUrl,
+                    onload: function (response) {
+                        if (response.status === 200) {
+                            let data = null;
+                            try {
+                                data = JSON.parse(response.responseText);
+                            } catch (e) {
+                                console.error('Search API parse error:', e);
+                            }
+                            handleResponse(data);
+                        } else {
+                            console.warn('Search API error:', response.status, response.responseText);
+                            resolve({
+                                ok: false,
+                                title: '',
+                                message: `Search API error (status ${response.status}).`
+                            });
+                        }
+                    },
+                    onerror: function (err) {
+                        console.error('Search API request failed:', err);
+                        resolve({
+                            ok: false,
+                            title: '',
+                            message: 'Search API request failed.'
+                        });
+                    }
+                });
+            } else {
+                fetch(apiUrl)
+                    .then(r => (r.ok ? r.json() : null))
+                    .then(data => handleResponse(data))
+                    .catch(err => {
+                        console.error('Search API fetch failed:', err);
+                        resolve({
+                            ok: false,
+                            title: '',
+                            message: 'Search API fetch failed.'
+                        });
+                    });
+            }
+        });
+    }
+
+    // ---- Custom modal with shuffle + check buttons -----------------------
     function showDestinationModal(endTitle) {
         return new Promise(async (resolve) => {
             // Create overlay
@@ -217,18 +324,18 @@ ${bbCodeLine}`;
             overlay.style.display = 'flex';
             overlay.style.alignItems = 'center';
             overlay.style.justifyContent = 'center';
- 
+
             // Create modal box
             const modal = document.createElement('div');
             modal.style.backgroundColor = 'white';
             modal.style.color = 'black';
             modal.style.padding = '20px';
             modal.style.borderRadius = '8px';
-            modal.style.maxWidth = '480px';
+            modal.style.maxWidth = '520px';
             modal.style.width = '100%';
             modal.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
             modal.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
- 
+
             modal.innerHTML = `
                 <h5 style="margin-top:0; margin-bottom:10px;">Choose next Wikipedia article</h5>
                 <p style="margin:0 0 8px 0; font-size:14px;">
@@ -236,41 +343,47 @@ ${bbCodeLine}`;
                 </p>
                 <p style="margin:0 0 10px 0; font-size:13px;">
                     The field below is pre-filled with a random valid article from Wikipedia.<br>
-                    You can edit it or click <strong>Shuffle</strong> to get another random article.
+                    You can click <strong>Shuffle</strong> for a new random article, or enter your own<br>
+                    article and <strong>Check</strong> to make sure it's a valid Wikipedia article (fuzzy search).
                 </p>
                 <input type="text" id="ws-next-article-input"
-                    style="width:100%; padding:6px 8px; margin-bottom:10px; box-sizing:border-box; font-size:14px;" />
+                    style="width:100%; padding:6px 8px; box-sizing:border-box; font-size:14px; margin-bottom:8px;" />
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-                    <button id="ws-shuffle-btn" class="btn btn-outline-secondary" type="button">
-                       ⟳ Shuffle
-                    </button>
+                    <div>
+                        <button id="ws-shuffle-btn" class="btn btn-outline-secondary" type="button"
+                            style="margin-right:6px;">
+                            ⟳ Shuffle
+                        </button>
+                        <button id="ws-check-btn" class="btn btn-outline-secondary" type="button">
+                            ✓ Check
+                        </button>
+                    </div>
                     <div style="margin-left:auto;">
                         <button id="ws-cancel-btn" class="btn btn-secondary" type="button"
-                            style="margin-right:6px;">Cancel</button>
+                            style="margin-right:6px;">Close</button>
                         <button id="ws-ok-btn" class="btn btn-primary" type="button">Copy!</button>
                     </div>
                 </div>
-                <p id="ws-status" style="margin-top:6px; font-size:11px; color:#666;"></p>
+                <p id="ws-status" style="margin-top:6px; font-size:11px; color:#666; min-height:1em;"></p>
             `;
- 
+
             overlay.appendChild(modal);
             document.body.appendChild(overlay);
- 
+
             const inputEl = modal.querySelector('#ws-next-article-input');
             const shuffleBtn = modal.querySelector('#ws-shuffle-btn');
+            const checkBtn = modal.querySelector('#ws-check-btn');
             const okBtn = modal.querySelector('#ws-ok-btn');
             const cancelBtn = modal.querySelector('#ws-cancel-btn');
             const statusEl = modal.querySelector('#ws-status');
- 
-            let currentTitle = '';
- 
+
             async function setRandomTitle(showStatus = true) {
                 statusEl.textContent = 'Fetching random article...';
                 shuffleBtn.disabled = true;
+                checkBtn.disabled = true;
                 try {
                     const title = await getRandomWikipediaTitle();
-                    currentTitle = title || '';
-                    inputEl.value = currentTitle;
+                    inputEl.value = title || '';
                     if (showStatus) {
                         statusEl.textContent = title
                             ? `Random article: ${title}`
@@ -280,40 +393,80 @@ ${bbCodeLine}`;
                     }
                 } finally {
                     shuffleBtn.disabled = false;
+                    checkBtn.disabled = false;
                 }
             }
- 
-            // Initial random
+
+            async function runCheck() {
+                const raw = inputEl.value.trim();
+                if (!raw) {
+                    statusEl.textContent = 'Please enter a title to check.';
+                    return;
+                }
+                statusEl.textContent = 'Checking article...';
+                shuffleBtn.disabled = true;
+                checkBtn.disabled = true;
+                try {
+                    const result = await checkWikipediaTitle(raw);
+                    statusEl.textContent = result.message || '';
+                    if (result.ok && result.title) {
+                        // Update input to best match
+                        inputEl.value = result.title;
+                    }
+                } finally {
+                    shuffleBtn.disabled = false;
+                    checkBtn.disabled = false;
+                }
+            }
+
+            // Initial random fill (no status to avoid flicker)
             setRandomTitle(false);
- 
+
             // Button handlers
             shuffleBtn.addEventListener('click', () => {
                 setRandomTitle(true);
             });
- 
+
+            checkBtn.addEventListener('click', () => {
+                runCheck();
+            });
+
             okBtn.addEventListener('click', () => {
                 const val = inputEl.value.trim();
                 document.body.removeChild(overlay);
-                if (!val) {
-                    resolve(null);
-                } else {
-                    resolve(val);
-                }
+                resolve(val || null);
             });
- 
+
             cancelBtn.addEventListener('click', () => {
                 document.body.removeChild(overlay);
                 resolve(null);
             });
- 
-            // Close on overlay click (optional)
-            overlay.addEventListener('click', (e) => {
+
+            // Advanced overlay click handling:
+            // Only close when click starts AND ends on the overlay (no dragging out of modal)
+            let mouseDownOnOverlay = false;
+
+            overlay.addEventListener('mousedown', (e) => {
+                // Only count if the press starts on the overlay itself, not the modal
                 if (e.target === overlay) {
+                    mouseDownOnOverlay = true;
+                } else {
+                    mouseDownOnOverlay = false;
+                }
+            });
+
+            overlay.addEventListener('mouseup', (e) => {
+                // Close only if:
+                //   - mousedown started on overlay
+                //   - mouseup also happens on overlay
+                //   - target is overlay (not the modal box)
+                if (mouseDownOnOverlay && e.target === overlay) {
                     document.body.removeChild(overlay);
                     resolve(null);
                 }
+                mouseDownOnOverlay = false;
             });
- 
+
             // Enter/Esc shortcuts
             inputEl.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
@@ -322,7 +475,7 @@ ${bbCodeLine}`;
                     cancelBtn.click();
                 }
             });
- 
+
             inputEl.focus();
         });
     }
@@ -351,11 +504,11 @@ ${bbCodeLine}`;
     function injectButton(cardBody, runData) {
         // Find the "Return to home page" div
         const homeDiv = Array.from(cardBody.querySelectorAll('div')).find(d =>
-                                                                          d.textContent.includes('Return to home page')
-                                                                         );
+            d.textContent.includes('Return to home page')
+        );
         const playAgainDiv = Array.from(cardBody.querySelectorAll('div')).find(d =>
-                                                                               d.textContent.includes('Play again')
-                                                                              );
+            d.textContent.includes('Play again')
+        );
         if (!homeDiv) return;
  
         // Create container and button
