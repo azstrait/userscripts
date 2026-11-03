@@ -13,6 +13,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-end
+// @downloadURL  https://update.greasyfork.org/scripts/573099/%5BGGn%5D%20WikiSpeedruns%20Forum%20Post%20Helper.user.js
+// @updateURL    https://update.greasyfork.org/scripts/573099/%5BGGn%5D%20WikiSpeedruns%20Forum%20Post%20Helper.meta.js
 // ==/UserScript==
 
 (function () {
