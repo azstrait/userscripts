@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      2.0.0
+// @version      2.1.0
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
@@ -23,9 +23,16 @@
     // Debounce delay for suggestions, time between typing and suggestions appearing.
     // Increase for fewer API calls, decrease for faster suggestions.
     const DEBOUNCE_MS = 200;
+
     // Backlinks warning threshold (inclusive).
     // 0 backlinks always errors and blocks Copy!.
     const BACKLINKS_WARN_MAX = 5;
+
+    // Enable or disable warning text when
+    // the target resolves to a disambiguation page.
+    const WARN_ON_DISAMBIGUATION = true;
+
+    
     // ===================================================
 
     const AUTO_RUN_KEY = 'wikispeedruns_forum_helper_autorun';
@@ -334,6 +341,27 @@ ${bbCodeLine}`;
         return backlinks.length;
     }
 
+    // Detect disambiguation pages using pageprops.disambiguation.
+    // Value is usually "" (empty string), so property existence must be checked.
+    async function isDisambiguationPage(title) {
+        const url =
+            'https://en.wikipedia.org/w/api.php' +
+            '?action=query&format=json&origin=*' +
+            '&redirects=1&prop=pageprops&ppprop=disambiguation' +
+            '&titles=' + encodeURIComponent(title);
+
+        const data = await wikiApiGetJson(url);
+        const pagesObj = data && data.query && data.query.pages ? data.query.pages : null;
+        if (!pagesObj) return false;
+
+        const pageKey = Object.keys(pagesObj)[0];
+        const page = pagesObj[pageKey];
+        if (!page) return false;
+
+        if (!page.pageprops) return false;
+        return Object.prototype.hasOwnProperty.call(page.pageprops, 'disambiguation');
+    }
+
     // ---- Opensearch suggestions (live dropdown) --------------------------
     function fetchOpensearchSuggestions(query) {
         return new Promise((resolve) => {
@@ -397,9 +425,25 @@ ${bbCodeLine}`;
         });
     }
 
+    function isDarkThemeActive() {
+        return (document.documentElement.getAttribute('data-bs-theme') || '').toLowerCase() === 'dark';
+    }
+
     // ---- Custom modal with shuffle + check + opensearch suggestions ------
     function showDestinationModal(endTitle, buildPostForTitle) {
         return new Promise(async (resolve) => {
+            const darkMode = isDarkThemeActive();
+
+            // Bootstrap-ish theme tokens (fallbacks are chosen to be readable).
+            const theme = {
+                modalBg: darkMode ? '#212529' : '#ffffff',
+                modalText: darkMode ? '#f8f9fa' : '#212529',
+                mutedText: darkMode ? '#adb5bd' : '#666',
+                border: darkMode ? '#495057' : '#ccc',
+                suggestionsBg: darkMode ? '#212529' : '#ffffff',
+                suggestionHover: darkMode ? '#343a40' : '#e9ecef',
+            };
+
             // Create overlay
             const overlay = document.createElement('div');
             overlay.style.position = 'fixed';
@@ -415,8 +459,8 @@ ${bbCodeLine}`;
 
             // Create modal box
             const modal = document.createElement('div');
-            modal.style.backgroundColor = 'white';
-            modal.style.color = 'black';
+            modal.style.backgroundColor = theme.modalBg;
+            modal.style.color = theme.modalText;
             modal.style.padding = '20px';
             modal.style.borderRadius = '8px';
             modal.style.maxWidth = '520px';
@@ -443,7 +487,7 @@ ${bbCodeLine}`;
                         <!-- Suggestions pinned to bottom edge of textbox, matching textbox width -->
                         <ul id="ws-suggestions"
                             style="list-style:none; margin:0; padding:0; max-height:150px; overflow-y:auto;
-                                border:1px solid #ccc; border-radius:4px; display:none; background:white;
+                                border:1px solid ${theme.border}; border-radius:4px; display:none; background:${theme.suggestionsBg};
                                 font-size:14px; width:100%; box-sizing:border-box; z-index:1;">
                         </ul>
                     </div>
@@ -460,7 +504,7 @@ ${bbCodeLine}`;
                     </button>
                 </div>
 
-                <p id="ws-status" style="margin:0 0 4px 0; font-size:11px; color:#666; min-height:1em;"></p>
+                <p id="ws-status" style="margin:0 0 4px 0; font-size:11px; color:${theme.mutedText}; min-height:1em;"></p>
 
                 <div style="display:flex; justify-content:flex-end; align-items:center; margin-top:4px;">
                     <button id="ws-cancel-btn" class="btn btn-secondary" type="button"
@@ -519,7 +563,7 @@ ${bbCodeLine}`;
 
                 if (mode === 'error') statusEl.style.color = '#dc3545';
                 else if (mode === 'warn') statusEl.style.color = '#b58100'; // amber-ish
-                else statusEl.style.color = '#666';
+                else statusEl.style.color = theme.mutedText;
 
                 if (articleFrag) statusEl.appendChild(articleFrag);
 
@@ -541,6 +585,8 @@ ${bbCodeLine}`;
                 a.target = '_blank';
                 a.rel = 'noopener noreferrer';
                 a.textContent = title;
+                // links should stand out on dark backgrounds.
+                a.style.color = darkMode ? '#8ab4f8' : '';
                 return a;
             }
 
@@ -567,16 +613,17 @@ ${bbCodeLine}`;
                 return frag;
             }
 
-            // Normalizes title + checks backlinks. Only runs on:
+            // Normalizes title + checks backlinks + (optional) disambiguation.
+            // Only runs on:
             // - suggestion click
             // - shuffle click
             // - check click
-            async function validateAndRender(inputTitle, source) {
+            async function validateAndRender(inputTitle) {
                 // source: 'suggestion' | 'check' | 'shuffle'
                 lastValidationHadApiError = false;
 
                 // Reset status and Copy state during validation
-                setStatusLine({ mode: 'normal', articleFrag: document.createDocumentFragment(), tailText: 'Checking article...' });
+                setStatusLine({ mode: 'normal', articleFrag: null, tailText: 'Checking article...' });
                 setCopyButtonState('idle');
 
                 const raw = (inputTitle || '').trim();
@@ -646,6 +693,12 @@ ${bbCodeLine}`;
                     const blCount = await fetchBacklinksSampleCount(canonicalTitle);
                     const blDisplay = (blCount >= 50) ? '50+' : String(blCount);
 
+                    // Optional: disambiguation check on the canonical title
+                    let disambig = false;
+                    if (WARN_ON_DISAMBIGUATION) {
+                        disambig = await isDisambiguationPage(canonicalTitle);
+                    }
+
                     // Build article prefix fragment
                     const articleFrag = makeArticleFragment(articleKind, {
                         title: canonicalTitle,
@@ -654,7 +707,7 @@ ${bbCodeLine}`;
                         redirectTo
                     });
 
-                    // Apply message rules
+                    // Hard error: no backlinks => block Copy!
                     if (blCount === 0) {
                         setStatusLine({
                             mode: 'error',
@@ -665,7 +718,19 @@ ${bbCodeLine}`;
                         return { ok: false, canonicalTitle };
                     }
 
-                    if (blCount >= 1 && blCount <= BACKLINKS_WARN_MAX) {
+                    // Combined warning: low backlinks + disambiguation
+                    if (disambig && blCount >= 1 && blCount <= BACKLINKS_WARN_MAX) {
+                        setStatusLine({
+                            mode: 'warn',
+                            articleFrag,
+                            tailText: `, only ${blDisplay} backlinks were found, and this is a Disambiguation page. This page may make for a challenging speedrun.`
+                        });
+                        setCopyButtonState('idle');
+                        return { ok: true, canonicalTitle, backlinks: blCount, disambig: true };
+                    }
+
+                    // Low backlinks warning (non-disambiguation)
+                    if (!disambig && blCount >= 1 && blCount <= BACKLINKS_WARN_MAX) {
                         setStatusLine({
                             mode: 'warn',
                             articleFrag,
@@ -675,7 +740,18 @@ ${bbCodeLine}`;
                         return { ok: true, canonicalTitle, backlinks: blCount };
                     }
 
-                    // 6-49 => N backlinks found. 50 => 50+ backlinks found.
+                    // Disambiguation warning (not low backlinks)
+                    if (disambig) {
+                        setStatusLine({
+                            mode: 'warn',
+                            articleFrag,
+                            tailText: `, ${blDisplay} backlinks were found, but this is a Disambiguation page. This page may make for a challenging speedrun.`
+                        });
+                        setCopyButtonState('idle');
+                        return { ok: true, canonicalTitle, backlinks: blCount, disambig: true };
+                    }
+
+                    // Normal success: show backlinks part in pale green only.
                     setStatusLine({
                         mode: 'normal',
                         articleFrag,
@@ -709,7 +785,7 @@ ${bbCodeLine}`;
             }
 
             async function setRandomTitleAndValidate() {
-                statusEl.textContent = 'Fetching random article...';
+                setStatusLine({ mode: 'normal', articleFrag: null, tailText: 'Fetching random article...' });
                 shuffleBtn.disabled = true;
                 checkBtn.disabled = true;
                 try {
@@ -720,7 +796,7 @@ ${bbCodeLine}`;
                     shuffleBtn.disabled = false;
                     checkBtn.disabled = false;
                 }
-                await validateAndRender(inputEl.value, 'shuffle');
+                await validateAndRender(inputEl.value);
             }
 
             // Suggestions handling
@@ -745,7 +821,7 @@ ${bbCodeLine}`;
                     li.style.padding = '4px 8px';
                     li.style.cursor = 'pointer';
                     li.addEventListener('mouseenter', () => {
-                        li.style.backgroundColor = '#e9ecef';
+                        li.style.backgroundColor = theme.suggestionHover;
                     });
                     li.addEventListener('mouseleave', () => {
                         li.style.backgroundColor = '';
@@ -754,7 +830,7 @@ ${bbCodeLine}`;
                         inputEl.value = title;
                         hideSuggestions();
                         // Auto-check when a suggestion is chosen
-                        await validateAndRender(title, 'suggestion');
+                        await validateAndRender(title);
                     });
                     suggestionsEl.appendChild(li);
                 });
@@ -808,7 +884,7 @@ ${bbCodeLine}`;
                 }, 150);
             });
 
-            // Optional initial random fill (no status to avoid flicker)
+            // Optional initial random fill (with full validation)
             const autoFillRandom = GM_getValue(AUTO_FILL_RANDOM_KEY, false);
             if (autoFillRandom) {
                 await setRandomTitleAndValidate();
@@ -820,7 +896,7 @@ ${bbCodeLine}`;
             });
 
             checkBtn.addEventListener('click', () => {
-                validateAndRender(inputEl.value, 'check');
+                validateAndRender(inputEl.value);
             });
 
             okBtn.addEventListener('click', async () => {
@@ -915,8 +991,8 @@ ${bbCodeLine}`;
     }
 
     // ---- Core generation routine -----------------------------------------
-    async function generatePost(cardBody, cachedRunData) {
-        const runData = cachedRunData || parseRunData(cardBody);
+    async function generatePost(cardBody) {
+        const runData = parseRunData(cardBody);
         if (!runData.startTitle || !runData.endTitle || !runData.timeSeconds || !runData.numLinks || !runData.pathLine) {
             console.warn('Parsed run data seems incomplete:', runData);
             alert('Could not parse run data correctly. The page structure may have changed.');
@@ -926,7 +1002,7 @@ ${bbCodeLine}`;
     }
 
     // ---- Inject "Generate forum post" button ------------------------------
-    function injectButton(cardBody, runData) {
+    function injectButton(cardBody) {
         // Find the "Return to home page" div
         const homeDiv = Array.from(cardBody.querySelectorAll('div')).find(d =>
             d.textContent.includes('Return to home page')
@@ -957,7 +1033,7 @@ ${bbCodeLine}`;
         }
 
         button.addEventListener('click', () => {
-            generatePost(cardBody, runData);
+            generatePost(cardBody);
         });
     }
 
@@ -991,8 +1067,7 @@ ${bbCodeLine}`;
                     alert('Could not find run summary on this page.');
                     return;
                 }
-                const runData = parseRunData(cardBody);
-                await generatePost(cardBody, runData);
+                await generatePost(cardBody);
             });
         }
     }
@@ -1008,15 +1083,13 @@ ${bbCodeLine}`;
             });
             if (!cardBody) return;
 
-            const runData = parseRunData(cardBody);
-
             // Always inject the UI button
-            injectButton(cardBody, runData);
+            injectButton(cardBody);
 
             // Conditionally auto-run based on setting
             const autoRun = GM_getValue(AUTO_RUN_KEY, true);
             if (autoRun) {
-                await generatePost(cardBody, runData);
+                await generatePost(cardBody);
             }
         } catch (e) {
             console.error('WikiSpeedruns Forum Post Helper error:', e);
