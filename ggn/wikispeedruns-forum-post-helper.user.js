@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      2.1.0
+// @version      2.2.0
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
@@ -32,11 +32,16 @@
     // the target resolves to a disambiguation page.
     const WARN_ON_DISAMBIGUATION = true;
 
-    
+    // Attribution footer appended to copied posts
+    // (disabled by default, toggle in userscript menu).
+    const ATTRIBUTION_FOOTER_BBCODE =
+        '[align=right]Answered with the [url=https://greasyfork.org/en/scripts/573099]WikiSpeedruns Helper[/url]![/align]';
+
     // ===================================================
 
     const AUTO_RUN_KEY = 'wikispeedruns_forum_helper_autorun';
     const AUTO_FILL_RANDOM_KEY = 'wikispeedruns_forum_helper_autofill_random';
+    const APPEND_ATTRIBUTION_KEY = 'wikispeedruns_forum_helper_append_attribution_footer';
 
     // ---- Clipboard helper ------------------------------------------------
     async function copyToClipboard(text, statusHandler) {
@@ -71,6 +76,20 @@
 
         console.warn('No clipboard API available.');
         onStatus({ ok: false, error: new Error('No clipboard API available') });
+    }
+
+    function maybeAppendAttributionFooter(postText) {
+        const enabled = GM_getValue(APPEND_ATTRIBUTION_KEY, false);
+        if (!enabled) return postText;
+
+        const footer = ATTRIBUTION_FOOTER_BBCODE.trim();
+        if (!footer) return postText;
+
+        // Avoid duplicates when copying multiple times from the same modal/session.
+        if (postText.includes(footer)) return postText;
+
+        // Exactly one newline between the last line and the footer.
+        return postText.replace(/\s+$/, '') + '\n' + footer;
     }
 
     // ---- Wait for the finish card to be rendered -------------------------
@@ -920,7 +939,9 @@ ${bbCodeLine}`;
                     if (!proceed) return;
                 }
 
-                const finalText = buildPostForTitle(val);
+                let finalText = buildPostForTitle(val);
+                finalText = maybeAppendAttributionFooter(finalText);
+
                 okBtn.disabled = true;
 
                 await copyToClipboard(finalText, (res) => {
@@ -1041,6 +1062,7 @@ ${bbCodeLine}`;
     function setupMenu() {
         const autoRun = GM_getValue(AUTO_RUN_KEY, true);
         const autoFillRandom = GM_getValue(AUTO_FILL_RANDOM_KEY, false);
+        const appendAttribution = GM_getValue(APPEND_ATTRIBUTION_KEY, false);
 
         if (typeof GM_registerMenuCommand === 'function') {
             GM_registerMenuCommand(
@@ -1060,7 +1082,14 @@ ${bbCodeLine}`;
                 }
             );
 
-            // Still keep a manual "Generate" command
+            GM_registerMenuCommand(
+                appendAttribution ? '☑ Append attribution footer' : '☐ Append attribution footer',
+                () => {
+                    GM_setValue(APPEND_ATTRIBUTION_KEY, !appendAttribution);
+                    window.location.reload();
+                }
+            );
+
             GM_registerMenuCommand('Open forum post modal', async () => {
                 const cardBody = document.querySelector('.card.md .card-body');
                 if (!cardBody) {
