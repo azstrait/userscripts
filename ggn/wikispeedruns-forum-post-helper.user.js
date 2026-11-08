@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      2.2.1
+// @version      2.2.2
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
@@ -941,7 +941,7 @@ ${bbCodeLine}`;
                 }
 
                 let finalText = buildPostForTitle(val);
-                finalText = maybeAppendAttributionFooter(finalText);
+                // finalText = maybeAppendAttributionFooter(finalText);
 
                 okBtn.disabled = true;
 
@@ -1063,7 +1063,7 @@ ${bbCodeLine}`;
     function setupMenu() {
         const autoRun = GM_getValue(AUTO_RUN_KEY, true);
         const autoFillRandom = GM_getValue(AUTO_FILL_RANDOM_KEY, false);
-        const appendAttribution = GM_getValue(APPEND_ATTRIBUTION_KEY, false);
+        // const appendAttribution = GM_getValue(APPEND_ATTRIBUTION_KEY, false);
 
         if (typeof GM_registerMenuCommand === 'function') {
             GM_registerMenuCommand(
@@ -1083,13 +1083,13 @@ ${bbCodeLine}`;
                 }
             );
 
-            GM_registerMenuCommand(
-                appendAttribution ? '☑ Append attribution footer' : '☐ Append attribution footer',
-                () => {
-                    GM_setValue(APPEND_ATTRIBUTION_KEY, !appendAttribution);
-                    window.location.reload();
-                }
-            );
+            // GM_registerMenuCommand(
+            //     appendAttribution ? '☑ Append attribution footer' : '☐ Append attribution footer',
+            //     () => {
+            //         GM_setValue(APPEND_ATTRIBUTION_KEY, !appendAttribution);
+            //         window.location.reload();
+            //     }
+            // );
 
             GM_registerMenuCommand('Open forum post modal', async () => {
                 const cardBody = document.querySelector('.card.md .card-body');
