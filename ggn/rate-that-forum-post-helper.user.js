@@ -4,7 +4,7 @@
 // @author       azstrait
 // @license      MIT
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      2.1.1
+// @version      2.1.2
 // @match        https://www.pornpics.com/galleries/*
 // @match        https://pornpics.com/galleries/*
 // @match        https://www.boyspornpics.com/gallery/*
@@ -625,7 +625,7 @@
 
     function buildBBCode(imageUrls, galleryUrl) {
         const selected = imageUrls.slice(0, MAX_IMAGES);
-        const lines = selected.map(url => `[img=${url}]`);
+        const lines = selected.map(url => `[url=${url}][img=${url}][/url]`);
         lines.push(`[url=${galleryUrl}]Sauce[/url]`);
         return lines.join('\n');
     }
