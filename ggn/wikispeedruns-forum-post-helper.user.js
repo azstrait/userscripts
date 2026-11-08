@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         [GGn] WikiSpeedruns Forum Post Helper
 // @namespace    https://greasyfork.org/en/users/1566044
-// @version      2.2.0
+// @version      2.2.1
 // @description  Generate and copy a forum post when finishing a Wikipedia Speedrun.
 // @author       azstrait
 // @license      MIT
@@ -34,14 +34,15 @@
 
     // Attribution footer appended to copied posts
     // (disabled by default, toggle in userscript menu).
-    const ATTRIBUTION_FOOTER_BBCODE =
-        '[align=right]Answered with the [url=https://greasyfork.org/en/scripts/573099]WikiSpeedruns Helper[/url]![/align]';
+    // const ATTRIBUTION_FOOTER_BBCODE =
+    //     '[align=right]Answered with the [url=https://greasyfork.org/en/scripts/573099]WikiSpeedruns Helper[/url]![/align]';
 
     // ===================================================
 
     const AUTO_RUN_KEY = 'wikispeedruns_forum_helper_autorun';
     const AUTO_FILL_RANDOM_KEY = 'wikispeedruns_forum_helper_autofill_random';
-    const APPEND_ATTRIBUTION_KEY = 'wikispeedruns_forum_helper_append_attribution_footer';
+    // Disabled at the request of site staff
+    // const APPEND_ATTRIBUTION_KEY = 'wikispeedruns_forum_helper_append_attribution_footer';
 
     // ---- Clipboard helper ------------------------------------------------
     async function copyToClipboard(text, statusHandler) {
@@ -78,19 +79,19 @@
         onStatus({ ok: false, error: new Error('No clipboard API available') });
     }
 
-    function maybeAppendAttributionFooter(postText) {
-        const enabled = GM_getValue(APPEND_ATTRIBUTION_KEY, false);
-        if (!enabled) return postText;
+    // function maybeAppendAttributionFooter(postText) {
+    //     const enabled = GM_getValue(APPEND_ATTRIBUTION_KEY, false);
+    //     if (!enabled) return postText;
 
-        const footer = ATTRIBUTION_FOOTER_BBCODE.trim();
-        if (!footer) return postText;
+    //     const footer = ATTRIBUTION_FOOTER_BBCODE.trim();
+    //     if (!footer) return postText;
 
-        // Avoid duplicates when copying multiple times from the same modal/session.
-        if (postText.includes(footer)) return postText;
+    //     // Avoid duplicates when copying multiple times from the same modal/session.
+    //     if (postText.includes(footer)) return postText;
 
-        // Exactly one newline between the last line and the footer.
-        return postText.replace(/\s+$/, '') + '\n' + footer;
-    }
+    //     // Exactly one newline between the last line and the footer.
+    //     return postText.replace(/\s+$/, '') + '\n' + footer;
+    // }
 
     // ---- Wait for the finish card to be rendered -------------------------
     function waitForCardBody(timeoutMs = 10000) {
@@ -196,7 +197,7 @@
         const promptStart = encodeURIComponent(endTitle);
         const promptEnd = encodeURIComponent(nextEndTitle);
         const url = `https://wikispeedruns.com/play/quick_play?prompt_start=${promptStart}&prompt_end=${promptEnd}&lang=en`;
-        const bbCodeLine = `[url=${url}]${endTitle} -> ${nextEndTitle}[/url]`;
+        const bbCodeLine = `[url=${url}]${endTitle} → ${nextEndTitle}[/url]`;
 
         return `"${startTitle}" to "${endTitle}"
 Time: ${timeSeconds} Seconds
