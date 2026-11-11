@@ -9,6 +9,8 @@
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @icon         https://gazellegames.net/favicon.ico
+// @downloadURL  https://update.greasyfork.org/scripts/564508/%5BGGn%5D%20Mining%20Stats%20%28azstrait%20fork%29.user.js
+// @updateURL    https://update.greasyfork.org/scripts/564508/%5BGGn%5D%20Mining%20Stats%20%28azstrait%20fork%29.meta.js
 // ==/UserScript==
 (async function() {
     'use strict';
